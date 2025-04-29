@@ -1,0 +1,122 @@
+# Load necessary libraries
+library(readr)    # For reading CSV files efficiently
+library(dplyr)    # For data manipulation (mutate, lag, etc.)
+library(ggplot2)  # For plotting
+library(tidyr)    # For reshaping data (pivot_longer)
+
+# --- 1. Configuration: YOU NEED TO EDIT THESE ---
+
+# Define the full path to your CSV file
+# IMPORTANT: Use forward slashes '/' or double backslashes '\\'. Single backslashes '\' won't work.
+csv_file_path <- "C:/Local Data/st949/Yarner_Hydro.csv"  # 
+output_filename <- "channel_profile_plot_400dpi.png" # Choose a filename (PNG is good for plots)
+
+# Define the names of the columns in your CSV
+x_coordinate_column <- "x"        # Column with X coordinate (Easting/Longitude)
+y_coordinate_column <- "y"        # Column with Y coordinate (Northing/Latitude)
+bed_elevation_column <- "bed elev" # Column with Bed Elevation <-- *** VERIFY THIS NAME (case/space sensitive) ***
+water_elevation_column <- "w elev" # Column with Water Elevation <-- *** VERIFY THIS NAME (case/space sensitive) ***
+
+# --- 2. Load the Data ---
+
+# Check if the file exists
+if (!file.exists(csv_file_path)) {
+  stop("Error: CSV file not found at the specified path: ", csv_file_path)
+}
+
+# Read the CSV file
+tryCatch({
+  channel_data <- readr::read_csv(csv_file_path, show_col_types = FALSE)
+}, error = function(e) {
+  stop("Error reading the CSV file. Check path and format. Original error: ", e$message)
+})
+
+# --- 3. Data Check and Preparation ---
+
+# Verify required columns exist
+required_cols <- c(x_coordinate_column, y_coordinate_column, bed_elevation_column, water_elevation_column)
+missing_cols <- required_cols[!required_cols %in% names(channel_data)]
+if (length(missing_cols) > 0) {
+  stop("Error: The following required columns were not found in the CSV: ",
+       paste(missing_cols, collapse = ", "),
+       ". Check spelling, case, and spaces in the column names defined in the script.")
+}
+
+# Ensure elevation columns are numeric and handle potential NAs
+channel_data <- channel_data %>%
+  mutate(
+    across(all_of(c(bed_elevation_column, water_elevation_column)), as.numeric)
+  ) %>%
+  # Remove rows where elevation data is missing (optional, but often necessary for plotting)
+  filter(!is.na(.data[[bed_elevation_column]]) & !is.na(.data[[water_elevation_column]]))
+
+if (nrow(channel_data) == 0) {
+  stop("Error: No rows with valid bed and water elevation data found after checking for NAs.")
+}
+
+# Optional: Check for potential errors like water level below bed
+if(any(channel_data[[water_elevation_column]] < channel_data[[bed_elevation_column]], na.rm = TRUE)) {
+  warning("Warning: Some water elevation values are below bed elevation. Check your data for errors.")
+}
+
+
+# --- 4. Calculate Cumulative Distance Along Channel ---
+# Assumes points are ordered sequentially in the file
+
+channel_data <- channel_data %>%
+  mutate(
+    # Get coordinates of the *previous* point using lag()
+    prev_x = lag(.data[[x_coordinate_column]]),
+    prev_y = lag(.data[[y_coordinate_column]]),
+    # Calculate distance between consecutive points (segment length)
+    # Handle the first point where lag() returns NA - distance is 0
+    segment_distance = ifelse(is.na(prev_x), 0,
+                              sqrt((.data[[x_coordinate_column]] - prev_x)^2 + (.data[[y_coordinate_column]] - prev_y)^2)),
+    # Calculate cumulative distance along the profile
+    cumulative_distance = cumsum(segment_distance)
+  ) %>%
+  # Remove temporary columns if desired
+  select(-prev_x, -prev_y, -segment_distance)
+
+
+# --- 5. Prepare Data for Plotting (Long Format) ---
+# This makes plotting multiple lines (bed and water) easier with ggplot
+
+channel_data_long <- channel_data %>%
+  pivot_longer(
+    cols = all_of(c(bed_elevation_column, water_elevation_column)), # Columns to pivot
+    names_to = "Elevation_Type",     # New column for the original column name (Bed or Water)
+    values_to = "Elevation"          # New column for the elevation value
+  ) %>%
+  # Optional: Make Elevation_Type names prettier for the legend
+  mutate(Elevation_Type = case_when(
+    Elevation_Type == bed_elevation_column ~ "Bed Elevation",
+    Elevation_Type == water_elevation_column ~ "Water Surface Elevation",
+    TRUE ~ Elevation_Type # Keep original name if something unexpected happens
+  ))
+
+# --- 6. Create the Profile Plot ---
+
+profile_plot <- ggplot(channel_data_long, aes(x = cumulative_distance, y = Elevation, color = Elevation_Type)) +
+  geom_line(linewidth = 1) +  # Draw lines for bed and water surface (use linewidth for ggplot2 v3.4.0+)
+  geom_point(size = 1.5, aes(shape = Elevation_Type)) + # Optional: Add points where measurements were taken
+  scale_color_manual(values = c("Bed Elevation" = "red", "Water Surface Elevation" = "royalblue")) + # Custom colors
+  scale_shape_manual(values = c("Bed Elevation" = 16, "Water Surface Elevation" = 17)) + # Custom shapes (optional)
+  labs(
+    title = "Channel Profile: Bed and Water Surface Elevation",
+    subtitle = paste("Data source:", basename(csv_file_path)),
+    x = "Distance Along Channel (m)", # Assuming coordinates are in meters
+    y = "Elevation (m)",              # Assuming elevation is in meters
+    color = "Measurement",          # Legend title for color
+    shape = "Measurement"           # Legend title for shape
+  ) +
+  theme_bw() + # Black and white theme
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "bottom" # Move legend below plot
+  )
+
+# --- 7. Display the Plot ---
+
+print(profile_plot)
