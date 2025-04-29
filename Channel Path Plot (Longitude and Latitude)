@@ -1,0 +1,147 @@
+# Load necessary libraries
+library(ggplot2) # For plotting
+library(sf)      # For handling spatial data (points)
+library(readr)   # For reading CSV files efficiently
+
+# --- 1. Configuration: YOU NEED TO EDIT THESE ---
+
+# Define the full path to your CSV file
+# IMPORTANT: Use forward slashes '/' or double backslashes '\\'. Single backslashes '\' won't work.
+csv_file_path <- "C:/Local Data/st949/Yarner_Hydro.csv"  
+output_filename <- "channel_profile_plot_400dpi.png" # Choose a filename (PNG is good for plots)
+
+# Define the names of the coordinate columns in your CSV
+# Based on your description, these should be 'x' and 'y'
+x_coordinate_column <- "x"  # Using the column name you provided
+y_coordinate_column <- "y"  # Using the column name you provided
+
+# Define the Coordinate Reference System (CRS) of your 'x' and 'y' data
+# THIS IS IMPORTANT - CHECK HOW YOUR DATA WAS RECORDED
+# Common options:
+#   - 27700 : OSGB 1936 / British National Grid (Typical UK Easting/Northing)
+#   - 4326  : WGS 84 (Standard GPS Latitude/Longitude)
+coordinate_system_epsg <- 27700     # <-- *** CHANGE this if your coordinates are Lat/Lon (use 4326) or other system ***
+
+# --- 2. Load the Data ---
+
+# Check if the file exists before trying to read
+if (!file.exists(csv_file_path)) {
+  stop("Error: CSV file not found at the specified path: ", csv_file_path)
+}
+
+# Read the CSV file into a data frame
+# Using read_csv for better performance and consistency
+tryCatch({
+  channel_data <- readr::read_csv(csv_file_path, show_col_types = FALSE) # show_col_types = FALSE suppresses messages
+}, error = function(e) {
+  stop("Error reading the CSV file. Check the file path and ensure it's a valid CSV. Original error: ", e$message)
+})
+
+# --- 3. Data Check and Preparation ---
+
+# Display the first few rows and column names to verify
+print("First few rows of the data:")
+print(head(channel_data))
+print("Column names in the data:")
+print(names(channel_data))
+
+# Check if the specified coordinate columns 'x' and 'y' exist
+if (!all(c(x_coordinate_column, y_coordinate_column) %in% names(channel_data))) {
+  stop("Error: One or both required coordinate columns ('",
+       x_coordinate_column, "', '", y_coordinate_column,
+       "') were not found in the CSV file. Please check the CSV column names carefully (case-sensitive).")
+}
+
+# Check if coordinate columns contain numeric data
+if (!is.numeric(channel_data[[x_coordinate_column]]) || !is.numeric(channel_data[[y_coordinate_column]])) {
+  warning("Warning: Coordinate columns ('x' or 'y') do not appear to be numeric. Trying to convert. Check your CSV for non-numeric values in these columns.")
+  # Attempt conversion, errors might occur if conversion fails
+  channel_data[[x_coordinate_column]] <- as.numeric(channel_data[[x_coordinate_column]])
+  channel_data[[y_coordinate_column]] <- as.numeric(channel_data[[y_coordinate_column]])
+}
+
+
+# Remove rows where coordinates are missing (NA)
+original_rows <- nrow(channel_data)
+channel_data <- channel_data[!is.na(channel_data[[x_coordinate_column]]) & !is.na(channel_data[[y_coordinate_column]]), ]
+removed_rows <- original_rows - nrow(channel_data)
+if (removed_rows > 0) {
+  print(paste("Removed", removed_rows, "rows with missing coordinates."))
+}
+if (nrow(channel_data) == 0) {
+  stop("Error: No valid coordinate pairs found after removing missing values.")
+}
+
+
+# Convert the data frame to a spatial 'sf' object
+tryCatch({
+  channel_sf <- sf::st_as_sf(channel_data,
+                             coords = c(x_coordinate_column, y_coordinate_column),
+                             crs = coordinate_system_epsg,
+                             remove = FALSE) # Keep original coordinate columns if needed later
+}, error = function(e) {
+  stop("Error converting data frame to spatial 'sf' object. Check coordinate column names ('x', 'y') and the CRS value (", coordinate_system_epsg, "). Original error: ", e$message)
+})
+
+# --- 4. Plot the Channel Locations as Points ---
+
+# Determine appropriate axis labels based on CRS
+if (coordinate_system_epsg == 4326) {
+  x_axis_label <- "Longitude"
+  y_axis_label <- "Latitude"
+} else if (coordinate_system_epsg == 27700) {
+  x_axis_label <- "Easting (m, OSGB36)"
+  y_axis_label <- "Northing (m, OSGB36)"
+} else {
+  x_axis_label <- "X Coordinate" # Generic label
+  y_axis_label <- "Y Coordinate" # Generic label
+}
+
+# Create the plot using ggplot2 with geom_sf
+point_plot <- ggplot() +
+  geom_sf(data = channel_sf,        # Use the spatial object
+          color = "dodgerblue",     # Color of the points
+          size = 2.5) +             # Size of the points
+  labs(
+    title = "Map of Channel Measurement Locations",
+    subtitle = paste("Data source:", basename(csv_file_path)),
+    x = x_axis_label,
+    y = y_axis_label
+  ) +
+  theme_bw() +                      # A slightly different theme
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5)
+  ) +
+  # coord_sf ensures the map has the correct aspect ratio for its CRS
+  coord_sf(datum = st_crs(coordinate_system_epsg))
+
+# --- 5. Display the Point Plot ---
+
+print(point_plot)
+
+# --- Optional: Plot points connected by lines (assuming order matters) ---
+# This uses the original data frame and connects points in the order they appear in the file.
+
+line_plot <- ggplot(data = channel_data,
+                    aes_string(x = x_coordinate_column, y = y_coordinate_column)) + # Use aes_string for variable column names
+  geom_path(color = "royalblue", linewidth = 1) +   # Draw lines connecting the points (use linewidth for ggplot2 v3.4.0+)
+  geom_point(color = "red", size = 2) +       # Draw the points themselves on top
+  labs(
+    title = "Channel Path (Points Connected in Order)",
+    subtitle = paste("Data source:", basename(csv_file_path)),
+    x = x_axis_label,
+    y = y_axis_label
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5)
+  ) +
+  # Use coord_equal() for projected CRS like OSGB to maintain 1:1 aspect ratio visually.
+  # For geographic CRS (Lat/Lon), coord_sf() above is generally better.
+  coord_equal() # Use coord_equal() for OSGB or similar projected systems
+
+# --- 6. Display the Line Plot ---
+
+print(line_plot)
